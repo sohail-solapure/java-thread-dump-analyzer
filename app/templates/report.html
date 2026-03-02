@@ -1,0 +1,161 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Thread Dump Analysis Report</title>
+  <style>
+    body { font-family: DejaVu Sans, Arial, Helvetica, sans-serif; font-size: 11pt; color: #111; }
+    h1 { font-size: 18pt; margin-bottom: 4pt; }
+    h2 { font-size: 14pt; margin-top: 14pt; margin-bottom: 6pt; }
+    h3 { font-size: 12pt; margin-top: 10pt; margin-bottom: 4pt; }
+    .meta { font-size: 10pt; color: #333; }
+    /* Removed flex-based KV list for xhtml2pdf compatibility */
+    code { font-family: DejaVu Sans Mono, monospace; font-size: 10pt; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 4pt 6pt; vertical-align: top; }
+    th { background: #f2f2f2; }
+    .muted { color: #555; }
+    .section { page-break-inside: avoid; }
+    .small { font-size: 9pt; }
+    .mono { font-family: DejaVu Sans Mono, monospace; }
+    .pre { white-space: pre-wrap; border: 1px solid #ddd; background: #fafafa; padding: 6pt; }
+  </style>
+</head>
+<body>
+  <h1>Java Thread Dump Analysis Report</h1>
+  <p class="meta">File: <strong>{{ filename }}</strong><br/>
+     Generated: {{ analyzed_at or '-' }}</p>
+
+  {% if result %}
+  {% if ai_pdf_summary %}
+  <div class="section">
+    <h2>Executive Summary (AI)</h2>
+    <pre class="pre">{{ ai_pdf_summary }}</pre>
+  </div>
+  {% elif ai_insights %}
+  <div class="section">
+    <h2>Executive Summary (AI)</h2>
+    <pre class="pre">{{ ai_insights }}</pre>
+  </div>
+  {% endif %}
+  <div class="section">
+    <h2>Overview</h2>
+    <ul class="kv">
+      <li><strong>Total threads</strong><span>{{ result.total_threads }}</span></li>
+      <li><strong>Deadlocks detected</strong><span>{{ 'Yes' if result.deadlocks_detected else 'No' }}</span></li>
+    </ul>
+    {% if result.deadlock_note %}
+    <h3>Deadlock details</h3>
+    <div class="pre">{{ result.deadlock_note }}</div>
+    {% endif %}
+  </div>
+
+  {% if result.root_cause %}
+  <div class="section">
+    <h2>Root Cause</h2>
+    <p><strong>{{ result.root_cause.title }}</strong></p>
+    {% if result.root_cause.statement %}
+      <pre class="pre">{{ result.root_cause.statement }}</pre>
+    {% endif %}
+    {% if result.root_cause.details %}
+      <h3>Evidence</h3>
+      <ul>
+        {% for d in result.root_cause.details %}
+        <li>{{ d }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if ai_insights %}
+  <div class="section">
+    <h2>AI Insights</h2>
+    <pre class="pre">{{ ai_insights }}</pre>
+  </div>
+  {% elif ai_enabled %}
+  <div class="section">
+    <h2>AI Insights</h2>
+    <p class="muted small">AI Insights unavailable (key set, but no response).</p>
+  </div>
+  {% endif %}
+
+  <div class="section">
+    <h2>By State</h2>
+    <table>
+      <thead><tr><th>State</th><th>Count</th></tr></thead>
+      <tbody>
+        {% for k, v in result.aggregates.by_state.items() %}
+        <tr><td>{{ k }}</td><td>{{ v }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Hot Methods</h2>
+    <table>
+      <thead><tr><th>Method</th><th>Count</th></tr></thead>
+      <tbody>
+        {% for item in result.aggregates.hot_methods %}
+        <tr><td><code>{{ item.method }}</code></td><td>{{ item.count }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Contention Suspects</h2>
+    <table>
+      <thead><tr><th>Monitor</th><th>Waiters</th><th>Owner</th><th>Owner TID</th></tr></thead>
+      <tbody>
+        {% if result.aggregates.contention_monitors and result.aggregates.contention_monitors|length > 0 %}
+          {% for item in result.aggregates.contention_monitors %}
+          <tr>
+            <td class="mono">{{ item.monitor_id }}</td>
+            <td>{{ item.waiters }}</td>
+            <td>{{ item.owner_thread or '-' }}</td>
+            <td class="mono">{{ item.owner_tid or '-' }}</td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="4" class="muted">None</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Threads</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>State</th>
+          <th>Top Method</th>
+          <th>Waiting On</th>
+          <th>Held #</th>
+          <th>Ownable #</th>
+          <th>Priority</th>
+          <th>Stack Size</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in result.per_thread_summaries %}
+        <tr>
+          <td>{{ t.name }}</td>
+          <td>{{ t.state or 'UNKNOWN' }}</td>
+          <td class="mono">{{ t.top_method }}</td>
+          <td class="mono">{{ ', '.join(t.waiting_on) if t.waiting_on else '-' }}</td>
+          <td>{{ t.held_locks|length if t.held_locks else 0 }}</td>
+          <td>{{ t.ownable_syncs|length if t.ownable_syncs else 0 }}</td>
+          <td>{{ t.priority or '-' }}</td>
+          <td>{{ t.stack_size }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</body>
+</html>

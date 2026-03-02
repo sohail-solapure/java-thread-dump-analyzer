@@ -1,0 +1,943 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Java Thread Dump Analyzer</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+
+<body>
+  <!-- Full-screen loading overlay -->
+  <div id="loadingOverlay" class="loading-overlay" style="display:none;">
+    <div class="loading-content">
+      <div class="loading-spinner-large"></div>
+      <h2 id="loadingTitle">Analyzing Thread Dump...</h2>
+      <p id="loadingMessage" class="muted">Parsing threads and stack traces</p>
+      <div class="loading-progress">
+        <div class="loading-progress-bar" id="loadingProgressBar"></div>
+      </div>
+      <p id="loadingStep" class="muted small">Step 1 of 4: Parsing thread dump</p>
+    </div>
+  </div>
+
+  <main class="container" data-has-error="{{ 1 if error else 0 }}">
+    <header>
+      <h1>Java Thread Dump Analyzer</h1>
+      <p class="muted">Upload a .txt thread dump to get a concise summary.</p>
+    </header>
+
+    <section class="card upload-card">
+      <div class="upload-center">
+        <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data">
+          <label class="file-label">
+            <input id="fileInput" type="file" name="file" accept=".txt" required />
+          </label>
+          <button id="analyzeBtn" type="submit">Analyze</button>
+          <span id="analyzeSpinner" class="spinner" style="display:none;"></span>
+          <div id="analyzeNote" class="muted small"></div>
+          <div id="uploadError" class="error" style="display:none;"></div>
+        </form>
+      </div>
+      {% if filename %}
+      <p class="muted">Analyzed: {{ filename }}</p>
+      {% endif %}
+      {% if error %}
+      <div class="error">{{ error }}</div>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h2>How to read this</h2>
+      <ul>
+        <li><strong>Overview</strong>: check total threads and deadlocks.</li>
+        <li><strong>By State</strong>: many <span class="badge state-wait">WAITING</span> or <span
+            class="badge state-block">BLOCKED</span> threads can indicate contention.</li>
+        <li><strong>Thread States (Chart)</strong>: visual representation of thread distribution across different
+          states.</li>
+        <li><strong>AI Insights</strong>: AI-powered analysis providing intelligent observations about the thread dump,
+          including potential issues and patterns.</li>
+        <li><strong>Root Cause Analysis</strong>: Detailed investigation of the primary causes of thread issues, with
+          supporting evidence and recommended actions.</li>
+        <li><strong>Hot Methods</strong>: top frames that appear most often — hotspots.</li>
+        <li><strong>Contention Suspects</strong>: locks with many waiters; owner thread shows who holds it.</li>
+        <li><strong>Threads</strong>: rows tinted red/orange are most relevant; click <em>View</em> under the name for
+          full details and stack.</li>
+      </ul>
+    </section>
+
+    {% if result %}
+    <section class="grid grid-2">
+      <div class="card">
+        <h2>Overview</h2>
+        <ul class="kv">
+          <li><strong>Total threads</strong><span>{{ result.total_threads }}</span></li>
+          <li><strong>Deadlocks detected</strong>
+            <span class="badge {% if result.deadlocks_detected %}state-block{% else %}state-run{% endif %}">
+              {{ 'Yes' if result.deadlocks_detected else 'No' }}
+            </span>
+          </li>
+        </ul>
+        <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+          <span class="muted small">Last analyzed: {{ analyzed_at or '-' }}</span>
+        </div>
+        {% if result.deadlock_note %}
+        <details style="margin-top:12px;">
+          <summary>Deadlock details</summary>
+          <pre>{{ result.deadlock_note }}</pre>
+        </details>
+        {% endif %}
+      </div>
+
+      <div class="card">
+        <h2>Thread States Distribution</h2>
+        <div id="echarts-state" style="width: 100%; height: 260px;"></div>
+        <!-- Data extraction block for ECharts -->
+        <script>
+          window.__chartDataState = [
+            {% for k, v in result.aggregates.by_state.items() %}
+          { name: "{{ k }}", value: parseInt("{{ v }}", 10) },
+          {% endfor %}
+          ];
+        </script>
+      </div>
+    </section>
+
+    <section class="grid grid-2">
+      <div class="card" style="grid-column: span 2;">
+        <h2>Hot Methods Analysis (Top of Stack)</h2>
+        <div id="echarts-hot-methods" style="width: 100%; height: 400px;"></div>
+        <script>
+          window.__chartDataHotMethods = [
+            {% for item in result.aggregates.hot_methods %}
+          { name: "{{ item.method | replace('\"', '\\\"') | replace('\\', '\\\\') }}", value: parseInt("{{ item.count }}", 10) },
+          {% endfor %}
+          ];
+        </script>
+      </div>
+
+      <div class="card" style="grid-column: span 2;">
+        <h2>Contention Suspects</h2>
+        {% if result.aggregates.contention_monitors and result.aggregates.contention_monitors|length > 0 %}
+        <div style="overflow-x: auto;">
+          <table class="table" style="width: 100%; border-collapse: collapse; margin-top: 10px; display: table;">
+            <thead>
+              <tr style="text-align: left; border-bottom: 1px solid #1f2937; color: #93c5fd;">
+                <th style="padding: 10px;">Monitor ID</th>
+                <th style="padding: 10px;">Waiters</th>
+                <th style="padding: 10px;">Owner Thread</th>
+                <th style="padding: 10px;">Owner TID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in result.aggregates.contention_monitors %}
+              <tr style="border-bottom: 1px solid #1f2937;">
+                <td style="padding: 10px;" class="mono">{{ item.monitor_id }}</td>
+                <td style="padding: 10px;">
+                  <span
+                    class="badge {% if item.waiters > 5 %}state-block{% elif item.waiters > 0 %}state-wait{% else %}state-other{% endif %}">
+                    {{ item.waiters }}
+                  </span>
+                </td>
+                <td style="padding: 10px;">{{ item.owner_thread or '-' }}</td>
+                <td style="padding: 10px;" class="mono">{{ item.owner_tid or '-' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        {% set blocked = result.aggregates.by_state.get('BLOCKED', 0) %}
+        {% if blocked and blocked > 0 %}
+        <p class="muted">{{ blocked }} BLOCKED thread(s) found, but no monitor ids parsed from dump. The dump format may
+          differ (consider tuning regex) or threads are blocked without visible monitors.</p>
+        {% else %}
+        <p class="muted">No contention suspects detected.</p>
+        {% endif %}
+        {% endif %}
+      </div>
+    </section>
+
+    {% if ai_insights %}
+    <section class="card ai-insights-card">
+      <h2><span class="section-icon">🤖</span> AI-Powered Insights</h2>
+      <div class="ai-content">{{ ai_insights | safe }}</div>
+      <p class="muted small" style="margin-top:12px;">Generated by AI (model: {{ ai_model }}). Results may not be 100%
+        accurate.</p>
+    </section>
+    {% elif ai_enabled %}
+    <section class="card">
+      <h2><span class="section-icon">🤖</span> AI Insights</h2>
+      <p class="muted">AI Insights are being processed or temporarily unavailable. Model: <code>{{ ai_model }}</code>.
+        This can happen due to network issues, quota limits, or the thread dump being too large for the API context
+        window.</p>
+    </section>
+    {% endif %}
+
+    {% if result.root_cause %}
+    <section class="card root-cause-card">
+      <h2><span class="section-icon">🔍</span> Root Cause Analysis</h2>
+      <div class="root-cause-header">
+        <h3 style="margin:8px 0;">{{ result.root_cause.title }}</h3>
+      </div>
+      {% if result.root_cause.statement %}
+      <div class="root-cause-statement">
+        <div class="ai-content">{{ result.root_cause.statement | safe }}</div>
+      </div>
+      {% endif %}
+      {% if result.root_cause.details %}
+      <div style="margin-top:16px;">
+        <h3>📋 Evidence</h3>
+        <ul class="evidence-list">
+          {% for d in result.root_cause.details %}
+          <li>{{ d }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+      {% if result.root_cause.suggested_actions %}
+      <div style="margin-top:16px;">
+        <h3>🛠️ Suggested Actions</h3>
+        <ol class="actions-list">
+          {% for a in result.root_cause.suggested_actions %}
+          <li>{{ a }}</li>
+          {% endfor %}
+        </ol>
+      </div>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <section class="card">
+      <h2>Threads</h2>
+      <div class="table">
+        <div class="thead">
+          <div>Name</div>
+          <div>State</div>
+          <div>Top Method</div>
+          <div>Waiting On</div>
+          <div>Held #</div>
+          <div>Ownable #</div>
+          <div>Prio</div>
+          <div>Stack</div>
+        </div>
+        {% for t in result.per_thread_summaries %}
+        {% set wait_count = t.waiting_on|length if t.waiting_on else 0 %}
+        {% set held_count = t.held_locks|length if t.held_locks else 0 %}
+        {% set own_count = t.ownable_syncs|length if t.ownable_syncs else 0 %}
+        <div
+          class="trow{% if t.state == 'BLOCKED' %} is-blocked{% elif t.state in ['WAITING','TIMED_WAITING'] %} is-waiting{% endif %}">
+          <div class="name-cell" title="tid={{t.tid}} nid={{t.nid}}">
+            <div>{{ t.name }}</div>
+            <details>
+              <summary>View</summary>
+              <ul>
+                <li><strong>Daemon</strong>: {{ t.daemon }}</li>
+                <li><strong>Priority</strong>: {{ t.priority or '-' }} <span class="muted">(os_prio: {{ t.os_prio or '-'
+                    }})</span></li>
+                <li><strong>Ownable Syncs</strong>: <span class="mono">{{ ', '.join(t.ownable_syncs) if t.ownable_syncs
+                    else '-' }}</span></li>
+                <li><strong>Waiting On</strong>: <span class="mono">{{ ', '.join(t.waiting_on) if t.waiting_on else '-'
+                    }}</span></li>
+                <li><strong>Held Locks</strong>: <span class="mono">{{ ', '.join(t.held_locks) if t.held_locks else '-'
+                    }}</span></li>
+              </ul>
+              {% if t.stack_snippet and t.stack_snippet|length > 0 %}
+              <details>
+                <summary>Stack (top {{ t.stack_snippet|length }})</summary>
+                <pre>{{ '\n'.join(t.stack_snippet) }}</pre>
+              </details>
+              {% endif %}
+            </details>
+          </div>
+          <div>
+            {% set st = t.state or 'UNKNOWN' %}
+            <span
+              class="badge {% if st == 'RUNNABLE' %}state-run{% elif st == 'BLOCKED' %}state-block{% elif st in ['WAITING','TIMED_WAITING'] %}state-wait{% else %}state-other{% endif %}">{{
+              st }}</span>
+          </div>
+          <div class="mono" title="{{ t.top_method }}">{{ t.top_method }}</div>
+          <div class="mono" title="{{ ', '.join(t.waiting_on) if t.waiting_on else '-' }}">
+            {% if wait_count > 0 %}
+            {{ t.waiting_on[0] }}{% if wait_count > 1 %} (+{{ wait_count - 1 }}){% endif %}
+            {% else %}-{% endif %}
+          </div>
+          <div>{{ held_count }}</div>
+          <div>{{ own_count }}</div>
+          <div>{{ t.priority or '-' }}</div>
+          <div>{{ t.stack_size }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+    {% if result %}
+    <!-- Chat Bot Container -->
+    <div id="chatBot" class="chat-bot">
+      <!-- Chat Header -->
+      <div class="chat-header" id="chatHeader">
+        <div class="chat-header-content">
+          <div class="chat-avatar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
+          </div>
+          <div class="chat-title">
+            <h3>Thread Dump Assistant</h3>
+            <p class="chat-status">Online</p>
+          </div>
+        </div>
+        <div class="chat-actions">
+          <button id="minimizeChat" class="chat-action-btn" aria-label="Minimize">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+          </button>
+          <button id="closeChat" class="chat-action-btn" aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Chat Messages -->
+      <div class="chat-messages" id="chatMessages">
+        <div class="welcome-message">
+          <p>Hello! I'm your Thread Dump Assistant. How can I help you analyze this thread dump?</p>
+          <ul class="suggestions">
+            <li>Are there any deadlocks?</li>
+            <li>What's the most common thread state?</li>
+            <li>Show me threads that are blocked or waiting</li>
+            <li>What are the main issues in this thread dump?</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Chat Input -->
+      <div class="chat-input-container">
+        <div class="chat-input-wrapper">
+          <div id="chatInput" class="chat-input" contenteditable="true" role="textbox" aria-multiline="true"
+            placeholder="Ask about this thread dump..."></div>
+          <button id="sendMessage" class="send-button" aria-label="Send message">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
+        <div class="chat-footer">
+          <span class="ai-notice">AI-powered analysis. May produce inaccurate information.</span>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+    {% if result %}
+    <!-- Hidden, print-friendly export container -->
+    <section id="export-report" aria-hidden="true" style="display:none;">
+      <h1>Java Thread Dump Analysis Report</h1>
+      <p class="meta">File: <strong>{{ filename }}</strong><br />
+        Generated: {{ analyzed_at or '-' }}</p>
+
+      <div class="section">
+        <h2>Overview</h2>
+        <ul class="kv">
+          <li><strong>Total threads</strong><span>{{ result.total_threads }}</span></li>
+          <li><strong>Deadlocks detected</strong><span>{{ 'Yes' if result.deadlocks_detected else 'No' }}</span></li>
+        </ul>
+        {% if result.deadlock_note %}
+        <h3>Deadlock details</h3>
+        <pre>{{ result.deadlock_note }}</pre>
+        {% endif %}
+      </div>
+
+      {% if result.root_cause %}
+      <div class="section">
+        <h2>Root Cause</h2>
+        <p><strong>{{ result.root_cause.title }}</strong></p>
+        {% if result.root_cause.statement %}
+        <p class="mono">{{ result.root_cause.statement }}</p>
+        {% endif %}
+        {% if result.root_cause.details %}
+        <h3>Evidence</h3>
+        <ul>
+          {% for d in result.root_cause.details %}
+          <li>{{ d }}</li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      {% if ai_insights %}
+      <div class="section">
+        <h2>AI Insights</h2>
+        <pre>{{ ai_insights }}</pre>
+      </div>
+      {% endif %}
+
+      <div class="section">
+        <h2>By State</h2>
+        <table class="export-table">
+          <thead>
+            <tr>
+              <th>State</th>
+              <th>Count</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for k, v in result.aggregates.by_state.items() %}
+            <tr>
+              <td>{{ k }}</td>
+              <td>{{ v }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section">
+        <h2>Hot Methods</h2>
+        <table class="export-table">
+          <thead>
+            <tr>
+              <th>Method</th>
+              <th>Count</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in result.aggregates.hot_methods %}
+            <tr>
+              <td><code>{{ item.method }}</code></td>
+              <td>{{ item.count }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section">
+        <h2>Contention Suspects</h2>
+        <table class="export-table">
+          <thead>
+            <tr>
+              <th>Monitor</th>
+              <th>Waiters</th>
+              <th>Owner</th>
+              <th>Owner TID</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% if result.aggregates.contention_monitors and result.aggregates.contention_monitors|length > 0 %}
+            {% for item in result.aggregates.contention_monitors %}
+            <tr>
+              <td class="mono">{{ item.monitor_id }}</td>
+              <td>{{ item.waiters }}</td>
+              <td>{{ item.owner_thread or '-' }}</td>
+              <td class="mono">{{ item.owner_tid or '-' }}</td>
+            </tr>
+            {% endfor %}
+            {% else %}
+            <tr>
+              <td colspan="4" class="muted">None</td>
+            </tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section">
+        <h2>Threads</h2>
+        <table class="export-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>State</th>
+              <th>Daemon</th>
+              <th>Priority (os_prio)</th>
+              <th>Top Method</th>
+              <th>Waiting On</th>
+              <th>Held Locks</th>
+              <th>Ownable Syncs</th>
+              <th>Stack Snippet</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in result.per_thread_summaries %}
+            <tr>
+              <td>{{ t.name }}</td>
+              <td>{{ t.state or 'UNKNOWN' }}</td>
+              <td>{{ t.daemon }}</td>
+              <td>{{ t.priority or '-' }} ({{ t.os_prio or '-' }})</td>
+              <td class="mono">{{ t.top_method }}</td>
+              <td class="mono">{{ ', '.join(t.waiting_on) if t.waiting_on else '-' }}</td>
+              <td class="mono">{{ ', '.join(t.held_locks) if t.held_locks else '-' }}</td>
+              <td class="mono">{{ ', '.join(t.ownable_syncs) if t.ownable_syncs else '-' }}</td>
+              <td>
+                {% if t.stack_snippet and t.stack_snippet|length > 0 %}
+                <pre style="white-space: pre-wrap; font-size: 10px;">{{ '\n'.join(t.stack_snippet) }}</pre>
+                {% else %}-{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+    <footer class="muted small">No data stored. Analysis happens in-memory per upload.</footer>
+  </main>
+
+  <!-- Chat Bot Container (initially hidden) -->
+  <div id="chatBot" class="chat-bot" style="display: none;" role="dialog" aria-modal="true"
+    aria-labelledby="chatHeader">
+    <div id="chatHeader" class="chat-header">
+      <div class="chat-header-content">
+        <h3 id="chatTitle">Thread Dump Assistant</h3>
+        <div class="chat-actions">
+          <button id="minimizeChat" class="chat-action-btn" aria-label="Minimize chat">
+            <span aria-hidden="true">−</span>
+          </button>
+          <button id="closeChat" class="chat-action-btn" aria-label="Close chat">
+            <span aria-hidden="true">×</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="chatMessages" class="chat-messages" role="log" aria-live="polite">
+      <!-- Messages will be inserted here -->
+    </div>
+
+    <div class="chat-input-container">
+      <div id="chatInput" class="chat-input" contenteditable="true" role="textbox" aria-multiline="true"
+        placeholder="Ask me about this thread dump..." aria-label="Type your message"></div>
+      <button id="sendMessage" class="send-message-btn" aria-label="Send message">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Floating Chat Toggle Button (initially hidden) -->
+  <button id="chatToggleBtn" class="chat-toggle-btn" aria-label="Open chat" aria-expanded="false"
+    aria-controls="chatBot" style="display: none;">
+    <svg viewBox="0 0 24 24" width="24" height="24">
+      <path fill="currentColor"
+        d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z" />
+    </svg>
+    <span class="sr-only">Chat with Thread Dump Assistant</span>
+  </button>
+
+  <script src="/static/chat.js"></script>
+  <script>
+    // Function to initialize chat when analysis is complete
+    function initializeChatAfterAnalysis() {
+      console.log('Analysis complete, initializing chat...');
+      const chat = window.initializeChat();
+      // Show the chat toggle button
+      const chatToggleBtn = document.getElementById('chatToggleBtn');
+      if (chatToggleBtn) {
+        chatToggleBtn.style.display = 'flex';
+      }
+      // Show welcome message
+      if (chat && typeof chat.showWelcomeMessage === 'function') {
+        chat.showWelcomeMessage();
+      }
+    }
+
+    // If we already have results (page refresh), initialize chat immediately
+    document.addEventListener('DOMContentLoaded', () => {
+      // Check if we have analysis results on page load
+      const hasResults = document.querySelector('.analysis-results') ||
+        document.getElementById('threadSummary') ||
+        document.querySelector('table.threads');
+
+      if (hasResults) {
+        console.log('Found existing analysis results, initializing chat...');
+        // Small delay to ensure DOM is fully rendered
+        setTimeout(initializeChatAfterAnalysis, 500);
+      }
+    });
+
+    // Listen for form submission to know when analysis is complete
+    document.addEventListener('DOMContentLoaded', () => {
+      const form = document.getElementById('uploadForm');
+      if (form) {
+        form.addEventListener('submit', () => {
+          // This will be called when the form is submitted
+          // The page will reload with results, so we'll handle it in DOMContentLoaded
+          console.log('Form submitted, waiting for analysis to complete...');
+        });
+      }
+    });
+  </script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      // Initialize ECharts for Thread States
+      const stateContainer = document.getElementById('echarts-state');
+      if (stateContainer && window.__chartDataState && window.__chartDataState.length > 0) {
+        const stateChart = echarts.init(stateContainer, 'dark');
+        const stateColorMap = {
+          'RUNNABLE': '#22c55e',
+          'BLOCKED': '#f87171',
+          'WAITING': '#fbbf24',
+          'TIMED_WAITING': '#facc15',
+          'UNKNOWN': '#9ca3af'
+        };
+        const stateOption = {
+          backgroundColor: 'transparent',
+          tooltip: {
+            trigger: 'item',
+            formatter: '{b}: {c} threads ({d}%)'
+          },
+          legend: {
+            orient: 'vertical',
+            left: 'right',
+            top: 'middle',
+            textStyle: { color: '#cbd5e1' }
+          },
+          series: [
+            {
+              name: 'Thread State',
+              type: 'pie',
+              radius: ['40%', '70%'],
+              avoidLabelOverlap: false,
+              itemStyle: {
+                borderRadius: 10,
+                borderColor: '#0b1220',
+                borderWidth: 2,
+                color: function (params) {
+                  return stateColorMap[params.name] || '#3b82f6';
+                }
+              },
+              label: {
+                show: false,
+                position: 'center'
+              },
+              emphasis: {
+                label: {
+                  show: true,
+                  fontSize: 20,
+                  fontWeight: 'bold',
+                  color: '#fff'
+                }
+              },
+              labelLine: {
+                show: false
+              },
+              data: window.__chartDataState
+            }
+          ]
+        };
+        stateChart.setOption(stateOption);
+
+        // Handle resizing
+        window.addEventListener('resize', function () {
+          stateChart.resize();
+        });
+      }
+
+      // Initialize ECharts for Hot Methods
+      const hotMethodsContainer = document.getElementById('echarts-hot-methods');
+      if (hotMethodsContainer && window.__chartDataHotMethods && window.__chartDataHotMethods.length > 0) {
+        const hotMethodsChart = echarts.init(hotMethodsContainer, 'dark');
+        const methodsData = window.__chartDataHotMethods.sort((a, b) => a.value - b.value); // Ascending for horizontal bar
+        const methodNames = methodsData.map(item => {
+          let name = item.name;
+          // Trim long method names for display
+          if (name.length > 70) {
+            name = '...' + name.substring(name.length - 67);
+          }
+          return name;
+        });
+        const methodCounts = methodsData.map(item => item.value);
+
+        const hotMethodsOption = {
+          backgroundColor: 'transparent',
+          tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'shadow' }
+          },
+          grid: {
+            left: '3%',
+            right: '4%',
+            bottom: '3%',
+            containLabel: true
+          },
+          xAxis: {
+            type: 'value',
+            boundaryGap: [0, 0.01],
+            splitLine: { show: false },
+            axisLabel: { color: '#cbd5e1' }
+          },
+          yAxis: {
+            type: 'category',
+            data: methodNames,
+            axisLabel: { color: '#e5e7eb', fontSize: 11, fontFamily: 'monospace' }
+          },
+          series: [
+            {
+              name: 'Frequency',
+              type: 'bar',
+              data: methodCounts,
+              itemStyle: {
+                color: new echarts.graphic.LinearGradient(1, 0, 0, 0, [
+                  { offset: 0, color: '#3b82f6' },
+                  { offset: 1, color: '#1e3a8a' }
+                ]),
+                borderRadius: [0, 5, 5, 0]
+              },
+              label: {
+                show: true,
+                position: 'right',
+                color: '#93c5fd'
+              }
+            }
+          ]
+        };
+        hotMethodsChart.setOption(hotMethodsOption);
+
+        window.addEventListener('resize', function () {
+          hotMethodsChart.resize();
+        });
+      }
+
+      // Chat bot functionality
+      const chatBot = document.getElementById('chatBot');
+      const chatHeader = document.getElementById('chatHeader');
+      const chatToggle = document.getElementById('chatToggle');
+      const chatMessages = document.getElementById('chatMessages');
+      const chatInput = document.getElementById('chatInput');
+      const sendMessageBtn = document.getElementById('sendMessage');
+
+      let isMinimized = false;
+      let messageHistory = [];
+
+      // Toggle chat window
+      chatHeader.addEventListener('click', () => {
+        isMinimized = !isMinimized;
+        updateChatUI();
+      });
+
+      chatToggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        isMinimized = !isMinimized;
+        updateChatUI();
+      });
+
+      function updateChatUI() {
+        if (isMinimized) {
+          chatBot.classList.add('chat-minimized');
+        } else {
+          chatBot.classList.remove('chat-minimized');
+          chatInput.focus();
+        }
+      }
+
+      // Add a message to the chat
+      function addMessage(text, isUser = false) {
+        const messageDiv = document.createElement('div');
+        messageDiv.className = `message ${isUser ? 'message-user' : 'message-bot'}`;
+        messageDiv.innerHTML = text;
+        chatMessages.appendChild(messageDiv);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+      }
+
+      // Show typing indicator
+      function showTyping() {
+        const typingDiv = document.createElement('div');
+        typingDiv.className = 'message message-bot';
+        typingDiv.id = 'typingIndicator';
+        typingDiv.innerHTML = `
+          <div class="typing-indicator">
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+          </div>
+        `;
+        chatMessages.appendChild(typingDiv);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        return typingDiv;
+      }
+
+      // Remove typing indicator
+      function hideTyping() {
+        const typing = document.getElementById('typingIndicator');
+        if (typing) typing.remove();
+      }
+
+      // Send message to server
+      async function sendMessage() {
+        const message = chatInput.value.trim();
+        if (!message) return;
+
+        // Add user message
+        addMessage(message, true);
+        chatInput.value = '';
+
+        // Show typing indicator
+        const typing = showTyping();
+
+        try {
+          const response = await fetch('/ask', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question: message }),
+          });
+
+          const data = await response.json();
+          hideTyping();
+
+          if (data.refused) {
+            addMessage("I can only answer questions about the current thread dump analysis.");
+          } else if (data.answer) {
+            addMessage(data.answer);
+          } else {
+            addMessage("I couldn't process that request. Please try again.");
+          }
+        } catch (error) {
+          console.error('Error:', error);
+          hideTyping();
+          addMessage("Sorry, I encountered an error. Please try again.");
+        }
+      }
+
+      // Event listeners
+      sendMessageBtn.addEventListener('click', sendMessage);
+      chatInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendMessage();
+        }
+      });
+
+      // File upload handling
+      const fileInput = document.getElementById('fileInput');
+      const analyzeBtn = document.getElementById('analyzeBtn');
+      const analyzeSpinner = document.getElementById('analyzeSpinner');
+      const analyzeNote = document.getElementById('analyzeNote');
+      const uploadError = document.getElementById('uploadError');
+      const form = document.getElementById('uploadForm');
+
+      // Collapse chat when analyzing
+      form.addEventListener('submit', function () {
+        const chat = window.threadDumpChat;
+        if (chat && chat.isOpen) {
+          chat.closeChat();
+        }
+      });
+
+      function updateBtn() {
+        analyzeBtn.disabled = !fileInput.files || fileInput.files.length === 0;
+      }
+
+      updateBtn();
+
+      fileInput.addEventListener('change', () => {
+        updateBtn();
+        const f = fileInput.files && fileInput.files[0];
+        analyzeNote.textContent = f ? `Selected: ${f.name}` : '';
+        uploadError.style.display = 'none';
+      });
+
+      if (form) {
+        form.addEventListener('submit', (e) => {
+          if (fileInput.files && fileInput.files.length > 0) {
+            analyzeBtn.disabled = true;
+            analyzeBtn.classList.add('analyzing');
+            analyzeSpinner.style.display = 'inline-block';
+
+            // Show the fullscreen loading overlay
+            const overlay = document.getElementById('loadingOverlay');
+            const loadingTitle = document.getElementById('loadingTitle');
+            const loadingMsg = document.getElementById('loadingMessage');
+            const loadingStep = document.getElementById('loadingStep');
+            const progressBar = document.getElementById('loadingProgressBar');
+
+            if (overlay) {
+              overlay.style.display = 'flex';
+
+              // Animate through loading steps
+              const steps = [
+                { title: 'Parsing Thread Dump...', msg: 'Reading thread headers and stack traces', step: 'Step 1 of 4: Parsing thread dump', pct: 15 },
+                { title: 'Analyzing Threads...', msg: 'Detecting states, locks, and contention patterns', step: 'Step 2 of 4: Thread analysis', pct: 40 },
+                { title: 'Running AI Analysis...', msg: 'Identifying root causes and generating insights', step: 'Step 3 of 4: AI-powered root cause analysis', pct: 70 },
+                { title: 'Generating Report...', msg: 'Building charts, evidence, and recommendations', step: 'Step 4 of 4: Report generation', pct: 90 },
+                { title: 'Almost Done...', msg: 'Finalizing results', step: 'Completing analysis...', pct: 95 },
+              ];
+
+              let stepIdx = 0;
+              function showNextStep() {
+                if (stepIdx < steps.length) {
+                  const s = steps[stepIdx];
+                  loadingTitle.textContent = s.title;
+                  loadingMsg.textContent = s.msg;
+                  loadingStep.textContent = s.step;
+                  progressBar.style.width = s.pct + '%';
+                  stepIdx++;
+                }
+              }
+              showNextStep(); // show first step immediately
+
+              // Advance steps on a timer
+              const stepIntervals = [3000, 5000, 15000, 10000];
+              let cumulative = 0;
+              stepIntervals.forEach((delay, i) => {
+                cumulative += delay;
+                setTimeout(showNextStep, cumulative);
+              });
+            }
+          } else {
+            e.preventDefault();
+          }
+        });
+      }
+
+      // Handle "View" buttons for thread details
+      document.querySelectorAll('.view-thread-btn').forEach(btn => {
+        btn.addEventListener('click', function () {
+          const threadId = this.dataset.threadId;
+          const content = document.getElementById(`thread-${threadId}`);
+          if (content) {
+            content.style.display = content.style.display === 'none' ? 'block' : 'none';
+            this.textContent = content.style.display === 'none' ? 'View' : 'Hide';
+          }
+        });
+      });
+    });
+  </script>
+  <!-- Load chat script -->
+  <script src="{{ url_for('static', path='chat.js') }}"></script>
+
+  <!-- Security: Disable right-click and DevTools shortcuts -->
+  <script>
+    document.addEventListener('contextmenu', event => event.preventDefault());
+    document.addEventListener('keydown', event => {
+      // Prevent F12
+      if (event.key === 'F12') {
+        event.preventDefault();
+      }
+      // Prevent Ctrl+Shift+I, Ctrl+Shift+C, Ctrl+Shift+J
+      if (event.ctrlKey && event.shiftKey && ['I', 'J', 'C'].includes(event.key.toUpperCase())) {
+        event.preventDefault();
+      }
+      // Prevent Ctrl+U (View Source)
+      if (event.ctrlKey && event.key.toUpperCase() === 'U') {
+        event.preventDefault();
+      }
+    });
+  </script>
+</body>
+
+</html>
